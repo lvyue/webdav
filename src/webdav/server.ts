@@ -7,12 +7,15 @@ const um = new webdav.SimpleUserManager();
 const user = um.addUser('admin', 'admin', true);
 
 const pm = new webdav.SimplePathPrivilegeManager();
-export default new webdav.WebDAVServer({
+const server = new webdav.WebDAVServer({
     requireAuthentification: true,
     httpAuthentication: new webdav.HTTPBasicAuthentication(um, 'Basic'),
     privilegeManager: pm,
     autoLoad: {
         serializers: [new AliOssSerializer()]
     },
+    // rootFileSystem: new webdav.PhysicalFileSystem(__dirname)
     rootFileSystem: new AliOssFileSystem(Config.oss.region, Config.oss.bucket, Config.oss.accessKeyId, Config.oss.accessKeySecret)
 });
+
+export default server;

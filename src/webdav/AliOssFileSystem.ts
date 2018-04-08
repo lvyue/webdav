@@ -42,21 +42,58 @@ export default class AliOssFileSystem extends webdav.FileSystem implements Optio
         [path: string]: AliOssResource;
     } = {};
     client: OSS;
-    cache: {
-        [url: string]: {
-            error: Error;
-            body: any;
-            date: number;
-        };
-    } = {};
 
     constructor(public region: string, public bucket: string, public accessKeyId: string, public accessKeySecret: string) {
         super(new AliOssSerializer());
         this.client = new OSS({ region, bucket, accessKeyId, accessKeySecret });
+        this.resources = { '/': new AliOssResource() };
+    }
+
+    protected _create?(path: webdav.Path, ctx: webdav.CreateInfo, callback: webdav.SimpleCallback): void {
+        if (path.isRoot()) return callback(webdav.Errors.InvalidOperation);
+        let url = path.toString(),
+            dir;
+        url = url.startsWith('/') ? url.slice(1) : url;
+        if (ctx.type.isDirectory) {
+            // dir
+            dir = url + (url.endsWith('/') ? '' : '/');
+            this.client.put(dir, Buffer.alloc(0)).then(() => callback()).catch(callback);
+        } else {
+            // file
+            debug('Create:', path);
+            callback();
+        }
+    }
+
+    protected _delete(path: webdav.Path, ctx: webdav.DeleteInfo, callback: webdav.SimpleCallback): void {
+        debug('_delete:', path.toString());
+        if (path.isRoot()) return callback(webdav.Errors.InvalidOperation);
+        let url = path.toString();
+        url = url.startsWith('/') ? url.slice(1) : url;
+        this._list({ prefix: url }, [], (err, data) => {
+            if (err) return callback(err);
+            if (data.length === 0) return callback();
+            const dir = url + (url.endsWith('/') ? '' : '/');
+            const f = data.filter(r => r.path === url || r.path.startsWith(dir));
+            if (f.length == 0) return callback(webdav.Errors.ResourceNotFound);
+            this.client
+                .deleteMulti(f.map(r => r.path), { quiet: true })
+                .then(() => {
+                    f.forEach(a => {
+                        let dir = '/' + a.path;
+                        dir = dir.endsWith('/') ? dir.substr(0, dir.length - 1) : dir;
+                        delete this.resources[dir];
+                    });
+                    callback();
+                })
+                .catch(callback);
+        });
     }
 
     protected _get(path: webdav.Path, callback: webdav.ReturnCallback<AliOssResource>): void {
         let url = path.toString();
+        const r = this.resources[url];
+        if (r) return callback(undefined, r);
         url = url.startsWith('/') ? url.slice(1) : url;
         this._list(
             {
@@ -69,6 +106,7 @@ export default class AliOssFileSystem extends webdav.FileSystem implements Optio
                 const dir = url + (url.endsWith('/') ? '' : '/');
                 const f = resources.filter(r => r.path === url || r.path === dir);
                 if (f.length === 1) {
+                    this.resources[path.toString()] = f[0];
                     // 只有一个
                     return callback(undefined, f[0]);
                 } else {
@@ -121,10 +159,6 @@ export default class AliOssFileSystem extends webdav.FileSystem implements Optio
                           )
                         : []
                 );
-                // data.forEach(o => {
-                //     const p = o.path;
-                //     if (p.startsWith()) this.resources[o.path] = o;
-                // });
                 if (res.nextMarker) {
                     // 继续搜索
                     options.marker = res.nextMarker;
@@ -135,39 +169,6 @@ export default class AliOssFileSystem extends webdav.FileSystem implements Optio
             })
             .catch(callback);
     }
-
-    protected _parse(path: webdav.Path, callback: webdav.ReturnCallback<AliOssResource[] | AliOssResource>) {
-        // console.log('_parse', path);
-        let url = path.toString();
-        url = url.startsWith('/') ? url.slice(1) : url;
-        this._list(
-            {
-                prefix: url,
-                delimiter: '/'
-            },
-            [],
-            (err, resources) => {
-                if (path.isRoot()) {
-                    return callback(err, resources);
-                }
-                if (err) return callback(webdav.Errors.ResourceNotFound);
-                const dir = url + (url.endsWith('/') ? '' : '/');
-                const f = resources.filter(r => r.path === url || r.path.startsWith(dir));
-                if (f.length === 1) {
-                    if (f[0].type.isFile) {
-                        return callback(undefined, f[0]);
-                    } else {
-                        return this._list({ prefix: f[0].path, delimiter: '/', marker: f[0].path }, [], callback);
-                    }
-                } else if (f.length > 1) {
-                    return callback(undefined, f);
-                } else {
-                    callback(webdav.Errors.ResourceNotFound);
-                }
-            }
-        );
-    }
-
     protected _openReadStream(path: webdav.Path, ctx: webdav.OpenReadStreamInfo, callback: webdav.ReturnCallback<Readable>): void {
         if (path.isRoot()) return callback(webdav.Errors.InvalidOperation);
         let oKey = path.toString();
@@ -196,7 +197,7 @@ export default class AliOssFileSystem extends webdav.FileSystem implements Optio
     }
 
     protected _lockManager(path: webdav.Path, ctx: webdav.LockManagerInfo, callback: webdav.ReturnCallback<webdav.ILockManager>): void {
-        // console.log('_lockManager', path.isRoot(), path);
+        debug('_lockManager', path);
         let resource = this.resources[path.toString()];
         if (resource) {
             return callback(undefined, resource.locks);
@@ -214,7 +215,7 @@ export default class AliOssFileSystem extends webdav.FileSystem implements Optio
     }
 
     protected _propertyManager(path: webdav.Path, ctx: webdav.PropertyManagerInfo, callback: webdav.ReturnCallback<webdav.IPropertyManager>): void {
-        // console.log('_propertyManager', path.isRoot(), path);
+        debug('_propertyManager', path);
         let resource = this.resources[path.toString()];
         if (resource) {
             return callback(undefined, resource.props);
@@ -225,7 +226,6 @@ export default class AliOssFileSystem extends webdav.FileSystem implements Optio
             return callback(undefined, resource.props);
         }
         this._get(path, (err, data) => {
-            // console.log(path, data);
             if (err || !data) return callback(webdav.Errors.ResourceNotFound);
             this.resources[path.toString()] = data;
             return callback(undefined, data.props);
@@ -233,7 +233,7 @@ export default class AliOssFileSystem extends webdav.FileSystem implements Optio
     }
 
     protected _readDir(path: webdav.Path, ctx: webdav.ReadDirInfo, callback: webdav.ReturnCallback<string[] | webdav.Path[]>): void {
-        console.log('_readDir', path.isRoot(), path);
+        debug('_readDir', path.isRoot(), path);
         let url = path.toString(),
             dir;
         url = url.startsWith('/') ? url.slice(1) : url;
@@ -247,45 +247,10 @@ export default class AliOssFileSystem extends webdav.FileSystem implements Optio
             [],
             (err, resources) => {
                 if (err) return callback(webdav.Errors.ResourceNotFound);
-                console.log(url, resources);
+                debug('Path:', url, ',Resources:', resources);
                 callback(undefined, resources.map(r => r.path));
             }
         );
-    }
-
-    protected _create?(path: webdav.Path, ctx: webdav.CreateInfo, callback: webdav.SimpleCallback): void {
-        if (path.isRoot()) return callback(webdav.Errors.InvalidOperation);
-        let url = path.toString(),
-            dir;
-        url = url.startsWith('/') ? url.slice(1) : url;
-        if (ctx.type.isDirectory) {
-            // dir
-            dir = url + (url.endsWith('/') ? '' : '/');
-            this.client.put(dir, Buffer.alloc(0)).then(() => callback()).catch(callback);
-        } else {
-            // file
-            debug('Create:', path);
-            callback();
-        }
-    }
-
-    protected _delete(path: webdav.Path, ctx: webdav.DeleteInfo, callback: webdav.SimpleCallback): void {
-        if (path.isRoot()) return callback(webdav.Errors.InvalidOperation);
-        let url = path.toString();
-        url = url.startsWith('/') ? url.slice(1) : url;
-        this._list({ prefix: url }, [], (err, data) => {
-            if (err) return callback(err);
-            if (data.length === 0) return callback();
-            const dir = url + (url.endsWith('/') ? '' : '/');
-            const f = data.filter(r => r.path === url || r.path.startsWith(dir));
-            if (f.length == 0) return callback();
-            this.client
-                .deleteMulti(f.map(r => r.path), { quiet: true })
-                .then(() => {
-                    callback();
-                })
-                .catch(callback);
-        });
     }
 
     protected _rename(path: webdav.Path, name: string, ctx: webdav.RenameInfo, callback: webdav.ReturnCallback<boolean>): void {
@@ -319,6 +284,11 @@ export default class AliOssFileSystem extends webdav.FileSystem implements Optio
                             this.client
                                 .deleteMulti(actions.map(a => a.from), { quiet: true })
                                 .then(() => {
+                                    actions.forEach(a => {
+                                        let dir = '/' + a.from;
+                                        dir = dir.endsWith('/') ? dir.substr(0, dir.length - 1) : dir;
+                                        delete this.resources[dir];
+                                    });
                                     callback();
                                 })
                                 .catch(callback);
@@ -338,10 +308,19 @@ export default class AliOssFileSystem extends webdav.FileSystem implements Optio
     }
 
     protected _fastExistCheck?(ctx: webdav.RequestContext, path: webdav.Path, callback: (exists: boolean) => void): void {
-        callback(!!this.resources[path.toString()]);
+        debug('_fastExistCheck:', path.toString());
+        if (path.isRoot()) return callback(true);
+        const resource = this.resources[path.toString()];
+        if (resource) return callback(true);
+        this._get(path, (e, r) => {
+            if (e) return callback(false);
+            if (r) return callback(true);
+            return callback(false);
+        });
     }
 
     protected _move(from: webdav.Path, to: webdav.Path, ctx: webdav.MoveInfo, callback: webdav.SimpleCallback): void {
+        debug('_move:from:', from.toString(), ',to:', to.toString());
         if (from.isRoot()) return callback(webdav.Errors.InvalidOperation);
         const fName = from.paths.slice(-1).join(''),
             tName = to.paths.slice(-1).join('');
@@ -379,6 +358,11 @@ export default class AliOssFileSystem extends webdav.FileSystem implements Optio
                                 this.client
                                     .deleteMulti(actions.map(a => a.from), { quiet: true })
                                     .then(() => {
+                                        actions.forEach(a => {
+                                            let dir = '/' + a.from;
+                                            dir = dir.endsWith('/') ? dir.substr(0, dir.length - 1) : dir;
+                                            delete this.resources[dir];
+                                        });
                                         callback();
                                     })
                                     .catch(callback);
@@ -398,7 +382,7 @@ export default class AliOssFileSystem extends webdav.FileSystem implements Optio
     }
 
     protected _copy(from: webdav.Path, to: webdav.Path, ctx: webdav.MoveInfo, callback: webdav.SimpleCallback): void {
-        // console.log('_copy:', from, to);
+        debug('_copy:from:', from.toString(), 'to', to.toString());
         if (from.isRoot()) return callback(webdav.Errors.InvalidOperation);
         const fName = from.paths.slice(-1).join(''),
             tName = to.paths.slice(-1).join('');
@@ -450,6 +434,7 @@ export default class AliOssFileSystem extends webdav.FileSystem implements Optio
     }
 
     protected _size(path: webdav.Path, ctx: webdav.SizeInfo, callback: webdav.ReturnCallback<number>): void {
+        debug('_size:', path.toString());
         if (path.isRoot()) return callback(undefined, undefined);
         this._get(path, (err, resource) => {
             if (
@@ -462,6 +447,7 @@ export default class AliOssFileSystem extends webdav.FileSystem implements Optio
     }
 
     protected _etag(path: webdav.Path, ctx: webdav.ETagInfo, callback: webdav.ReturnCallback<string>): void {
+        debug('_etag:', path.toString());
         if (path.isRoot()) return callback(undefined, undefined);
         this._get(path, (err, resource) => {
             if (
@@ -474,6 +460,7 @@ export default class AliOssFileSystem extends webdav.FileSystem implements Optio
     }
 
     protected _creationDate?(path: webdav.Path, ctx: webdav.CreationDateInfo, callback: webdav.ReturnCallback<number>): void {
+        debug('_creationDate:', path.toString());
         if (path.isRoot()) return callback(undefined, Date.now());
         this._get(path, (err, resource) => {
             if (
@@ -486,6 +473,7 @@ export default class AliOssFileSystem extends webdav.FileSystem implements Optio
     }
 
     protected _lastModifiedDate?(path: webdav.Path, ctx: webdav.LastModifiedDateInfo, callback: webdav.ReturnCallback<number>): void {
+        debug('_lastModifiedDate:', path.toString());
         if (path.isRoot()) return callback(undefined, Date.now());
         this._get(path, (err, resource) => {
             if (
@@ -498,16 +486,15 @@ export default class AliOssFileSystem extends webdav.FileSystem implements Optio
     }
 
     protected _displayName?(path: webdav.Path, ctx: webdav.DisplayNameInfo, callback: webdav.ReturnCallback<string>): void {
-        // console.log('_displayName', path.isRoot());
+        debug('_displayName', path.toString());
         if (path.isRoot()) return callback(undefined, '/');
         this._get(path, (err, resource) => {
             if (err || !resource) return callback(err || webdav.Errors.ResourceNotFound);
             return callback(undefined, resource.name);
         });
     }
-
     protected _type(path: webdav.Path, ctx: webdav.TypeInfo, callback: webdav.ReturnCallback<webdav.ResourceType>): void {
-        // console.log('_type', path.isRoot());
+        debug('_type', path.toString());
         if (path.isRoot()) return callback(undefined, webdav.ResourceType.Directory);
         this._get(path, (e, data) => {
             if (e) return callback(webdav.Errors.ResourceNotFound);

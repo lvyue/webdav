@@ -23,6 +23,6 @@ app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(expressValidator());
 
-app.use('/', webdav.extensions.express(Config.dav.path, webdavServer));
+app.use(webdav.extensions.express(Config.dav.path, webdavServer));
 
 export default app;
