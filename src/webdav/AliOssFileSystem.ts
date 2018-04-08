@@ -50,18 +50,31 @@ export default class AliOssFileSystem extends webdav.FileSystem implements Optio
     }
 
     protected _create?(path: webdav.Path, ctx: webdav.CreateInfo, callback: webdav.SimpleCallback): void {
+        debug('_create:', path.toString());
         if (path.isRoot()) return callback(webdav.Errors.InvalidOperation);
         let url = path.toString(),
-            dir;
+            dir: string;
         url = url.startsWith('/') ? url.slice(1) : url;
+        const timestamp = new Date().toISOString();
         if (ctx.type.isDirectory) {
             // dir
             dir = url + (url.endsWith('/') ? '' : '/');
-            this.client.put(dir, Buffer.alloc(0)).then(() => callback()).catch(callback);
+            this.client
+                .put(dir, Buffer.alloc(0), { meta: { ctime: timestamp } })
+                .then(() => {
+                    this.resources[path.toString()] = new AliOssResource({ path: dir, type: webdav.ResourceType.Directory, lastModified: timestamp } as AliOssResource);
+                    callback();
+                })
+                .catch(callback);
         } else {
             // file
-            debug('Create:', path);
-            callback();
+            this.client
+                .put(url, Buffer.alloc(0), { meta: { ctime: timestamp } })
+                .then(() => {
+                    this.resources[path.toString()] = new AliOssResource({ path: url, type: webdav.ResourceType.File, lastModified: timestamp } as AliOssResource);
+                    callback();
+                })
+                .catch(callback);
         }
     }
 
@@ -82,6 +95,7 @@ export default class AliOssFileSystem extends webdav.FileSystem implements Optio
                     f.forEach(a => {
                         let dir = '/' + a.path;
                         dir = dir.endsWith('/') ? dir.substr(0, dir.length - 1) : dir;
+                        console.log(dir, this.resources);
                         delete this.resources[dir];
                     });
                     callback();
@@ -170,6 +184,7 @@ export default class AliOssFileSystem extends webdav.FileSystem implements Optio
             .catch(callback);
     }
     protected _openReadStream(path: webdav.Path, ctx: webdav.OpenReadStreamInfo, callback: webdav.ReturnCallback<Readable>): void {
+        debug('_openReadStream:', path.toString());
         if (path.isRoot()) return callback(webdav.Errors.InvalidOperation);
         let oKey = path.toString();
         oKey = oKey.startsWith('/') ? oKey.slice(1) : oKey;
@@ -182,6 +197,7 @@ export default class AliOssFileSystem extends webdav.FileSystem implements Optio
     }
 
     protected _openWriteStream(path: webdav.Path, ctx: webdav.OpenWriteStreamInfo, callback: webdav.ReturnCallback<Writable>): void {
+        debug('_openWriteStream:', path.toString());
         if (path.isRoot()) return callback(webdav.Errors.InvalidOperation);
         const wStream = new Transform({
             transform(chunk, encoding, cb) {
@@ -197,7 +213,7 @@ export default class AliOssFileSystem extends webdav.FileSystem implements Optio
     }
 
     protected _lockManager(path: webdav.Path, ctx: webdav.LockManagerInfo, callback: webdav.ReturnCallback<webdav.ILockManager>): void {
-        debug('_lockManager', path);
+        debug('_lockManager', path.toString());
         let resource = this.resources[path.toString()];
         if (resource) {
             return callback(undefined, resource.locks);
@@ -215,7 +231,7 @@ export default class AliOssFileSystem extends webdav.FileSystem implements Optio
     }
 
     protected _propertyManager(path: webdav.Path, ctx: webdav.PropertyManagerInfo, callback: webdav.ReturnCallback<webdav.IPropertyManager>): void {
-        debug('_propertyManager', path);
+        debug('_propertyManager', path.toString());
         let resource = this.resources[path.toString()];
         if (resource) {
             return callback(undefined, resource.props);
@@ -233,7 +249,7 @@ export default class AliOssFileSystem extends webdav.FileSystem implements Optio
     }
 
     protected _readDir(path: webdav.Path, ctx: webdav.ReadDirInfo, callback: webdav.ReturnCallback<string[] | webdav.Path[]>): void {
-        debug('_readDir', path.isRoot(), path);
+        debug('_readDir', path.toString());
         let url = path.toString(),
             dir;
         url = url.startsWith('/') ? url.slice(1) : url;
@@ -254,6 +270,7 @@ export default class AliOssFileSystem extends webdav.FileSystem implements Optio
     }
 
     protected _rename(path: webdav.Path, name: string, ctx: webdav.RenameInfo, callback: webdav.ReturnCallback<boolean>): void {
+        debug('_rename', path.toString());
         if (path.isRoot()) return callback(webdav.Errors.InvalidOperation);
         this._type(path, { context: ctx.context }, (err, type) => {
             if (err) return callback(err);

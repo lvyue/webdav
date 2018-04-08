@@ -19,8 +19,8 @@ export default class AliOssResource {
             this.locks = new webdav.LocalLockManager();
         } else {
             const r = data as AliOssResource;
-            this.props = r.props;
-            this.locks = r.locks;
+            this.props = r.props || new webdav.LocalPropertyManager();
+            this.locks = r.locks || new webdav.LocalLockManager();
             this.type = r.type;
             this.lastModified = r.lastModified;
             this.name = r.name;
