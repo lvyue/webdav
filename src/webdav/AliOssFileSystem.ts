@@ -55,7 +55,7 @@ export default class AliOssFileSystem extends webdav.FileSystem implements Optio
         let url = path.toString(),
             dir: string;
         url = url.startsWith('/') ? url.slice(1) : url;
-        const timestamp = new Date().toISOString();
+        const timestamp = Date.now();
         if (ctx.type.isDirectory) {
             // dir
             dir = url + (url.endsWith('/') ? '' : '/');
@@ -145,31 +145,34 @@ export default class AliOssFileSystem extends webdav.FileSystem implements Optio
                 if (res.statusCode === 404) e = webdav.Errors.ResourceNotFound;
                 data = data.concat(
                     res.objects && res.objects.length > 0
-                        ? res.objects.map(obj => ({
-                              name: obj.name.split('/').splice(-2).join(''),
-                              path: obj.name,
-                              size: obj.size,
-                              url: obj.url,
-                              etag: obj.etag,
-                              lastModified: obj.lastModified,
-                              storageClass: obj.storageClass,
-                              storageType: obj.type,
-                              type: obj.name.endsWith('/') ? webdav.ResourceType.Directory : webdav.ResourceType.File,
-                              props: new webdav.LocalPropertyManager(),
-                              locks: new webdav.LocalLockManager()
-                          }))
+                        ? res.objects.map(
+                              obj =>
+                                  new AliOssResource({
+                                      name: obj.name.split('/').splice(-2).join(''),
+                                      path: obj.name,
+                                      size: obj.size,
+                                      url: obj.url,
+                                      etag: obj.etag,
+                                      lastModified: new Date(obj.lastModified).getTime(),
+                                      storageClass: obj.storageClass,
+                                      storageType: obj.type,
+                                      type: obj.name.endsWith('/') ? webdav.ResourceType.Directory : webdav.ResourceType.File,
+                                      props: new webdav.LocalPropertyManager(),
+                                      locks: new webdav.LocalLockManager()
+                                  })
+                          )
                         : [],
                     res.prefixes && res.prefixes.length > 0
                         ? res.prefixes.map(
                               obj =>
-                                  ({
+                                  new AliOssResource({
                                       name: obj.split('/').splice(-2).join(''),
                                       path: obj,
                                       size: 0,
                                       type: webdav.ResourceType.Directory,
                                       props: new webdav.LocalPropertyManager(),
                                       locks: new webdav.LocalLockManager()
-                                  } as AliOssResource)
+                                  })
                           )
                         : []
                 );
@@ -206,7 +209,7 @@ export default class AliOssFileSystem extends webdav.FileSystem implements Optio
         });
         let oKey = path.toString();
         oKey = oKey.startsWith('/') ? oKey.slice(1) : oKey;
-        this.client.putStream(oKey, wStream).then(debug).catch((e: Error) => {
+        this.client.putStream(oKey, wStream, { meta: { ctime: Date.now() } }).then(debug).catch((e: Error) => {
             wStream.emit('error', e);
         });
         callback(undefined, wStream);
@@ -232,19 +235,12 @@ export default class AliOssFileSystem extends webdav.FileSystem implements Optio
 
     protected _propertyManager(path: webdav.Path, ctx: webdav.PropertyManagerInfo, callback: webdav.ReturnCallback<webdav.IPropertyManager>): void {
         debug('_propertyManager', path.toString());
-        let resource = this.resources[path.toString()];
-        if (resource) {
-            return callback(undefined, resource.props);
-        }
         if (path.isRoot()) {
-            resource = new AliOssResource();
-            this.resources[path.toString()] = resource;
-            return callback(undefined, resource.props);
+            return callback(undefined, this.resources[path.toString()].props);
         }
-        this._get(path, (err, data) => {
-            if (err || !data) return callback(webdav.Errors.ResourceNotFound);
-            this.resources[path.toString()] = data;
-            return callback(undefined, data.props);
+        this._get(path, (err, resource) => {
+            if (err || !resource) return callback(webdav.Errors.ResourceNotFound);
+            return callback(undefined, resource.props);
         });
     }
 
@@ -346,7 +342,7 @@ export default class AliOssFileSystem extends webdav.FileSystem implements Optio
             return this._rename(from, tName, { context: ctx.context, destinationPath: to }, callback);
         } else {
             // 移动
-            this._type(from, { context: ctx.context }, (err, type) => {
+            this.type(ctx.context, from, (err, type) => {
                 if (err) return callback(err);
                 if (!type) return callback(webdav.Errors.ResourceNotFound);
                 let srcPath = from.toString(),
@@ -454,11 +450,7 @@ export default class AliOssFileSystem extends webdav.FileSystem implements Optio
         debug('_size:', path.toString());
         if (path.isRoot()) return callback(undefined, undefined);
         this._get(path, (err, resource) => {
-            if (
-                err ||
-                !resource // 未找到
-            )
-                return callback(err || webdav.Errors.ResourceNotFound);
+            if (err || !resource) return callback(err || webdav.Errors.ResourceNotFound);
             return callback(err, resource.type.isDirectory ? undefined : resource.size);
         });
     }
@@ -467,11 +459,7 @@ export default class AliOssFileSystem extends webdav.FileSystem implements Optio
         debug('_etag:', path.toString());
         if (path.isRoot()) return callback(undefined, undefined);
         this._get(path, (err, resource) => {
-            if (
-                err ||
-                !resource // 未找到
-            )
-                return callback(err || webdav.Errors.ResourceNotFound);
+            if (err || !resource) return callback(err || webdav.Errors.ResourceNotFound);
             return callback(err, resource.type.isDirectory ? undefined : resource.etag);
         });
     }
@@ -480,12 +468,9 @@ export default class AliOssFileSystem extends webdav.FileSystem implements Optio
         debug('_creationDate:', path.toString());
         if (path.isRoot()) return callback(undefined, Date.now());
         this._get(path, (err, resource) => {
-            if (
-                err ||
-                !resource // 未找到
-            )
-                return callback(err || webdav.Errors.ResourceNotFound);
-            return callback(err, resource.type.isDirectory ? Date.now() : new Date(resource.lastModified).getTime());
+            if (err || !resource) return callback(err || webdav.Errors.ResourceNotFound);
+            console.log(resource);
+            return callback(err, resource.creationDate);
         });
     }
 
@@ -493,12 +478,8 @@ export default class AliOssFileSystem extends webdav.FileSystem implements Optio
         debug('_lastModifiedDate:', path.toString());
         if (path.isRoot()) return callback(undefined, Date.now());
         this._get(path, (err, resource) => {
-            if (
-                err ||
-                !resource // 未找到
-            )
-                return callback(err || webdav.Errors.ResourceNotFound);
-            return callback(err, resource.type.isDirectory ? Date.now() : new Date(resource.lastModified).getTime());
+            if (err || !resource) return callback(err || webdav.Errors.ResourceNotFound);
+            return callback(err, resource.lastModified);
         });
     }
 
